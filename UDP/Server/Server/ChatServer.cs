@@ -25,13 +25,13 @@ namespace Server
 		}
 	}
 
-	internal class Server
+	internal class ChatServer
 	{
 		private readonly int PORT = 5000;
 		private UdpClient socket;
 		private List<IPEndPoint> clientList = new List<IPEndPoint>();
 
-		public Server()
+		public ChatServer()
 		{
 			socket = new UdpClient(PORT);
 			Console.WriteLine($"Server listening on port: {PORT}");

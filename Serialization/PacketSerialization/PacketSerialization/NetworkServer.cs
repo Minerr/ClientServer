@@ -58,8 +58,6 @@ namespace PacketSerialization
 			player.name = name;
 			player.position = new Position(x, y, z);
 		#endregion
-
-		
 			using(MemoryStream stream = new MemoryStream())
 			{
 				buffer = BitConverter.GetBytes(serverTime.Ticks);
