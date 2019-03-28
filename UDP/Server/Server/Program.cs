@@ -11,9 +11,6 @@ namespace Server
 		{
 			GameServer server = new GameServer();
 			server.Run();
-
-			Console.WriteLine("Press key to terminate server... ");
-			Console.ReadKey();
 		}
 	}
 }

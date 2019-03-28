@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
+using System.Timers;
 
 namespace Server
 {
@@ -17,12 +18,13 @@ namespace Server
 		Connected = 3
 	}
 
-	internal enum Request
+	public enum Request
 	{
 		None = 0,
 		Disconnect = 1,
 		JoinGame = 2,
-		JoinSpectators = 3
+		JoinSpectators = 3,
+		MovePosition = 4
 	}
 
 	internal class Position
@@ -44,14 +46,14 @@ namespace Server
 		}
 	}
 
-	internal class PlayerInfo
+	internal class ClientInfo
 	{
 		public IPEndPoint EndPoint { get; }
 		public ConnectionState State { get; set; }
 		public string Name { get; set; }
 		public ushort playerNumber { get; set; }
 
-		public PlayerInfo(string name, IPEndPoint endPoint, ConnectionState state)
+		public ClientInfo(string name, IPEndPoint endPoint, ConnectionState state)
 		{
 			Name = name;
 			EndPoint = endPoint;
@@ -66,15 +68,15 @@ namespace Server
 
 		private UdpClient socket;
 
-		private List<PlayerInfo> clients;
+		private List<ClientInfo> clients;
 		private Position[] playerPositions;
-		private IPEndPoint[] players;
+		private List<IPEndPoint> players;
 		private TimeSpan serverTime;
 
 		public GameServer()
 		{
-			clients = new List<PlayerInfo>();
-			players = new IPEndPoint[3];
+			clients = new List<ClientInfo>();
+			players = new List<IPEndPoint>();
 
 			playerPositions = new Position[]
 			{
@@ -92,6 +94,24 @@ namespace Server
 		public void Run()
 		{
 			socket.BeginReceive(ReceiveCallback, null);
+
+			Timer timer = new Timer(16);
+			timer.Elapsed += new ElapsedEventHandler(OnTriggerTimer);
+			timer.Enabled = true;
+
+			bool isRunning = true;
+			while(isRunning)
+			{
+				// Game loop
+
+			}
+
+			timer.Enabled = false;
+		}
+
+		private void OnTriggerTimer(object sender, ElapsedEventArgs e)
+		{
+			BroadcastWorldState();
 		}
 
 		private void ReceiveCallback(IAsyncResult result)
@@ -108,110 +128,133 @@ namespace Server
 
 				int nameLength = BitConverter.ToInt32(data, nextIndex);
 				nextIndex += 4;
-
 				string name = Encoding.ASCII.GetString(data, nextIndex, nameLength);
 				nextIndex += nameLength;
 
-				if (packetState == ConnectionState.Connecting)
+				// Client verification
+				ClientInfo client = GetClient(endPoint);
+
+				if (client == null)
 				{
-					AddPlayer(endPoint, name, packetState);
+					AddClient(endPoint, name);
 					SendVerificationPacket(endPoint);
+					Console.WriteLine($"Sending verification to: {endPoint}.");
 				}
-				else if(packetState == ConnectionState.Verification)
+				else if(packetState == ConnectionState.Verification && client.State == ConnectionState.Connecting)
 				{
-					UpdatePlayer(endPoint, name, ConnectionState.Connected);
-					BroadcastWorldState();
+					Console.WriteLine($"Received verification from: {endPoint}, client is now connected.");
+					client.State = ConnectionState.Connected;
 				}
-				else if(packetState == ConnectionState.Connected)
+				else if(packetState == ConnectionState.Connected && client.State == ConnectionState.Connected)
 				{
 					Request request = (Request)BitConverter.ToUInt16(data, nextIndex);
 					nextIndex += 2;
 
-					if(request == Request.JoinGame)
+					if(request == Request.None)
 					{
-						JoinGame(endPoint);
+						
 					}
-					else if (request == Request.JoinSpectators)
+					else if(request == Request.JoinGame)
 					{
-						JoinSpectators(endPoint);
+						JoinGame(client);
 					}
-					else if (request == Request.Disconnect)
+					else if(request == Request.JoinSpectators)
 					{
-						RemovePlayer(endPoint);
+						JoinSpectators(client);
 					}
+					else if(request == Request.Disconnect)
+					{
+						RemoveClient(client);
+					}
+					else if(request == Request.MovePosition)
+					{
+						if(client.playerNumber > 0)
+						{
+							bool moveUp = BitConverter.ToBoolean(data, nextIndex);
+							nextIndex++;
 
-					UpdatePlayer(endPoint, name, ConnectionState.Connected);
-					BroadcastWorldState();
+							bool moveDown = BitConverter.ToBoolean(data, nextIndex);
+							nextIndex++;
+
+							MovePlayerPosition(client.playerNumber, moveUp, moveDown);
+						}
+					}
 				}
 			}
 
 			socket.BeginReceive(ReceiveCallback, null);
 		}
 
-		private void RemovePlayer(IPEndPoint endPoint)
+		private bool VerifyPacket(IPEndPoint endPoint, ConnectionState packetState)
 		{
-			throw new NotImplementedException();
+			ClientInfo client = GetClient(endPoint);
+
+			if(client == null && packetState == ConnectionState.Connecting)
+			{
+				return true;
+			}
+
+			if(client?.State == packetState)
+			{
+				return true;
+			}
+
+			return false;
 		}
 
-		private void JoinSpectators(IPEndPoint endPoint)
+		private void MovePlayerPosition(int playerNumber, bool moveUp, bool moveDown)
 		{
-			throw new NotImplementedException();
+			Position currentPos = playerPositions[playerNumber];
+
+			int moveDirection = moveUp && moveDown ? 0 : moveUp ? 1 : -1; // 0 if both keys are pressed, 1 if only up, -1 if only down.
+
+			currentPos.y += moveDirection * 0.01f;
 		}
 
-		// TODO: Refactor this ASAP
-		private void JoinGame(IPEndPoint endPoint)
+		private void RemoveClient(ClientInfo client)
+		{
+			Console.WriteLine($"Player: {client.Name}({client.EndPoint}) was removed from the server.");
+			players.Remove(client.EndPoint);
+
+			// TODO: Remove client from list after awhile.
+			client.State = ConnectionState.Disconnected;
+		}
+
+		private void JoinSpectators(ClientInfo client)
+		{
+			players.Remove(client.EndPoint);
+			client.playerNumber = 0;
+		}
+
+		private void JoinGame(ClientInfo client)
 		{
 			ushort playerNumber = 0;
 
-			for (int i = 0; i < players.Length; i++)
+			if(playerNumber < 3)
 			{
-				IPEndPoint playerEndPoint = players[i];
-
-				if(playerEndPoint == null)
-				{
-					playerEndPoint = endPoint;
-					playerNumber = (ushort)(i + 1);
-
-					clients[GetPlayerIndex(endPoint)].playerNumber = playerNumber;
-
-					break;
-				}
+				players.Add(client.EndPoint);
+				playerNumber = (ushort)players.Count;
 			}
 
-			SendJoinGamePacket(playerNumber, endPoint);
+			client.playerNumber = playerNumber;
+
+			SendJoinGamePacket(client);
 		}
 
-		private void AddPlayer(IPEndPoint endPoint, string name, ConnectionState state)
+		private void AddClient(IPEndPoint endPoint, string name)
 		{
 			// If it's a new client, add to the client list
-			if (GetPlayer(endPoint) == null)
+			if (GetClient(endPoint) == null)
 			{
-				Console.WriteLine($"Player: {name}({endPoint}) connected to server.");
-				clients.Add(new PlayerInfo(name, endPoint, state));
+				Console.WriteLine($"Player: {name}({endPoint}) is connecting to the server.");
+				clients.Add(new ClientInfo(name, endPoint, ConnectionState.Connecting));
 			}
 		}
 
-		public PlayerInfo GetPlayer(IPEndPoint endPoint)
+		public ClientInfo GetClient(IPEndPoint endPoint)
 		{
 			return clients.Find(p => p.EndPoint.Equals(endPoint));
 		}
-
-		public void UpdatePlayer(IPEndPoint endPoint, string name, ConnectionState state)
-		{
-			PlayerInfo player = GetPlayer(endPoint);
-
-			if(player != null)
-			{
-				player.Name = name;
-				player.State = state;
-			}
-		}
-
-		private int GetPlayerIndex(IPEndPoint endPoint)
-		{
-			return clients.FindIndex(p => p.EndPoint.Equals(endPoint));
-		}
-
 
 		// ---- Send packets---- //
 		private void SendDataToClient(byte[] data, IPEndPoint endPoint)
@@ -222,30 +265,19 @@ namespace Server
 			}
 		}
 
-		private void SendVerificationPacket(IPEndPoint endPoint)
-		{
-			byte[] data = GenerateVerificationPacket();
-			SendDataToClient(data, endPoint);
-		}
 
-		private void SendJoinGamePacket(ushort playerNumber, IPEndPoint endPoint)
-		{
-			byte[] data = GenerateJoinGamePacket(playerNumber);
-			SendDataToClient(data, endPoint);
-		}
-
-
-		// TODO: Call 30 times per second
 		private void BroadcastWorldState()
 		{
 			try
 			{
 				byte[] data = GenerateWorldPacket();
 
-				foreach(PlayerInfo player in clients)
+				foreach(ClientInfo player in clients)
 				{
-					//Console.WriteLine($"Sending world data to: {player.Name}");
-					socket.Send(data, data.Length, player.EndPoint);
+					if(player.State == ConnectionState.Connected)
+					{
+						socket.Send(data, data.Length, player.EndPoint);
+					}
 				}
 			}
 			catch(Exception e)
@@ -257,8 +289,7 @@ namespace Server
 
 		// ---- Generated packets ---- //
 
-
-		private byte[] GenerateJoinGamePacket(ushort playerNumber)
+		private void SendJoinGamePacket(ClientInfo client)
 		{
 			byte[] data, buffer;
 			using (MemoryStream stream = new MemoryStream())
@@ -272,16 +303,16 @@ namespace Server
 				buffer = BitConverter.GetBytes((ushort)Request.JoinGame);
 				stream.Write(buffer, 0, buffer.Length);
 
-				buffer = BitConverter.GetBytes(playerNumber);
+				buffer = BitConverter.GetBytes(client.playerNumber);
 				stream.Write(buffer, 0, buffer.Length);
 
 				data = stream.GetBuffer();
 			}
 
-			return data;
+			SendDataToClient(data, client.EndPoint);
 		}
 
-		private byte[] GenerateVerificationPacket()
+		private void SendVerificationPacket(IPEndPoint endPoint)
 		{
 			byte[] data, buffer;
 			using (MemoryStream stream = new MemoryStream())
@@ -295,7 +326,7 @@ namespace Server
 				data = stream.GetBuffer();
 			}
 
-			return data;
+			SendDataToClient(data, endPoint);
 		}
 
 		/// <summary>
@@ -352,14 +383,20 @@ namespace Server
 					stream.Write(buffer, 0, buffer.Length);
 				}
 
-				for(int i = 0; i < clients.Count; i++)
+				List<ClientInfo> connectedClients = clients.Where(c => c.State == ConnectionState.Connected).ToList();
+				int connectedClientCount = connectedClients.Count();
+
+				buffer = BitConverter.GetBytes(connectedClientCount);
+				stream.Write(buffer, 0, buffer.Length);
+
+				for(int i = 0; i < connectedClientCount; i++)
 				{
-					byte[] nameBuffer = Encoding.ASCII.GetBytes(clients[i].Name);
+					byte[] nameBuffer = Encoding.ASCII.GetBytes(connectedClients[i].Name);
 					buffer = BitConverter.GetBytes(nameBuffer.Length);
 					stream.Write(buffer, 0, buffer.Length);
 					stream.Write(nameBuffer, 0, nameBuffer.Length);
 
-					buffer = BitConverter.GetBytes(clients[i].playerNumber);
+					buffer = BitConverter.GetBytes(connectedClients[i].playerNumber);
 					stream.Write(buffer, 0, buffer.Length);
 				}
 
